@@ -117,7 +117,7 @@ guardrail_agent = Agent(
 math_tutor_agent = Agent(
     name="Math Tutor",
     handoff_description="Specialist agent for math questions",
-    instructions=SECURE_INSTRUCTIONS + "You provide help with math problems. Explain your reasoning at each step and include examples.",
+    instructions=SECURE_INSTRUCTIONS + "You provide help with math problems. You don't need to explain your reasoning, just provide the answer and the operations.",
     input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
 )
 
