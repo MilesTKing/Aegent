@@ -5,6 +5,7 @@ import uvicorn
 import uuid
 import re
 import asyncio
+import requests  # Add this import for MCP calls
 
 # --- Security Constants and Checks ---
 MAX_INPUT_LENGTH = 500
@@ -76,7 +77,8 @@ AGENT_CARD = {
     "capabilities": [
         {"name": "triage", "description": "Route a question to the right agent."},
         {"name": "math", "description": "Answer math questions."},
-        {"name": "history", "description": "Answer history questions."}
+        {"name": "history", "description": "Answer history questions."},
+        {"name": "time", "description": "Get current time or convert time between timezones using MCP Time Server."}
     ],
     "version": "1.0.0",
     "a2a_protocol_version": "0.2.0"
@@ -107,6 +109,13 @@ class HistoryInput(BaseModel):
 class HistoryOutput(BaseModel):
     answer: str
 
+class TimeInput(BaseModel):
+    name: str  # 'get_current_time' or 'convert_time'
+    arguments: dict
+
+class TimeOutput(BaseModel):
+    result: dict
+
 # --- Secure Agents ---
 guardrail_agent = Agent(
     name="Guardrail check",
@@ -135,6 +144,27 @@ triage_agent = Agent(
     input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
 )
 
+# --- MCP Time Server Integration ---
+MCP_TIME_URL = "http://localhost:8080/"
+
+def call_mcp_time_server(method: str, arguments: dict) -> dict:
+    payload = {
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": arguments,
+        "id": str(uuid.uuid4())
+    }
+    try:
+        resp = requests.post(MCP_TIME_URL, json=payload, timeout=5)
+        resp.raise_for_status()
+        data = resp.json()
+        if "result" in data:
+            return data["result"]
+        else:
+            return {"error": data.get("error", "Unknown error from MCP server")}
+    except Exception as e:
+        return {"error": str(e)}
+
 # --- JSON-RPC 2.0 Handler ---
 @app.post("/a2a")
 async def a2a_endpoint(request: Request):
@@ -155,6 +185,10 @@ async def a2a_endpoint(request: Request):
         input_obj = HistoryInput(**params)
         result_obj = await Runner.run(history_tutor_agent, input_obj.question)
         result = HistoryOutput(answer=str(result_obj.final_output))
+    elif method == "time":
+        input_obj = TimeInput(**params)
+        mcp_result = call_mcp_time_server(input_obj.name, input_obj.arguments)
+        result = TimeOutput(result=mcp_result)
     else:
         return {
             "jsonrpc": "2.0",
