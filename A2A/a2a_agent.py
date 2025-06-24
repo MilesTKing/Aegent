@@ -147,6 +147,31 @@ triage_agent = Agent(
 # --- MCP Time Server Integration ---
 MCP_TIME_URL = "http://localhost:8080/"
 
+# Mapping from common timezone abbreviations to IANA timezone names
+TIMEZONE_ABBREVIATIONS = {
+    "edt": "America/New_York",
+    "est": "America/New_York",
+    "pst": "America/Los_Angeles",
+    "pdt": "America/Los_Angeles",
+    "cst": "America/Chicago",
+    "cdt": "America/Chicago",
+    "mst": "America/Denver",
+    "mdt": "America/Denver",
+    "gmt": "Etc/GMT",
+    "utc": "Etc/UTC",
+    "bst": "Europe/London",
+    "cet": "Europe/Paris",
+    "jst": "Asia/Tokyo",
+    "hkt": "Asia/Hong_Kong",
+    # Add more as needed
+}
+
+def map_timezone(tz):
+    if not tz:
+        return tz
+    tz_lower = tz.lower()
+    return TIMEZONE_ABBREVIATIONS.get(tz_lower, tz)
+
 def call_mcp_time_server(method: str, arguments: dict) -> dict:
     payload = {
         "jsonrpc": "2.0",
@@ -173,8 +198,55 @@ async def a2a_endpoint(request: Request):
     params = data.get("params", {})
     id_ = data.get("id", str(uuid.uuid4()))
 
+    # Helper: detect time question
+    def is_time_question(text):
+        text = text.lower()
+        time_keywords = ["time", "timezone", "convert time", "current time", "what time", "when is", "clock", "now in", "utc", "pst", "est", "cst", "gmt", "jst", "bst", "cet", "edt", "pdt", "date", "hour"]
+        return any(word in text for word in time_keywords)
+
     if method == "triage":
         input_obj = TriageInput(**params)
+        # Route to time server if time question
+        if is_time_question(input_obj.query):
+            # Try to parse for conversion or current time
+            q = input_obj.query.lower()
+            if "convert" in q or "in" in q:
+                # Try to extract time conversion (very basic)
+                # Example: "Convert 16:30 from New York to Tokyo"
+                import re
+                m = re.search(r'(\d{1,2}:\d{2})\s*(from|in)\s*([\w/]+)\s*(to|in)\s*([\w/]+)', q)
+                if m:
+                    time_val = m.group(1)
+                    source = map_timezone(m.group(3).replace(' ', '_'))
+                    target = map_timezone(m.group(5).replace(' ', '_'))
+                    mcp_result = call_mcp_time_server("convert_time", {
+                        "source_timezone": source,
+                        "time": time_val,
+                        "target_timezone": target
+                    })
+                    return {
+                        "jsonrpc": "2.0",
+                        "result": {"answer": mcp_result},
+                        "id": id_
+                    }
+            # Otherwise, try to get current time in a place
+            m = re.search(r'(time|current time|now)\s*(in)?\s*([\w/]+)', q)
+            if m:
+                tz = map_timezone(m.group(3).replace(' ', '_'))
+                mcp_result = call_mcp_time_server("get_current_time", {"timezone": tz})
+                return {
+                    "jsonrpc": "2.0",
+                    "result": {"answer": mcp_result},
+                    "id": id_
+                }
+            # Fallback: just call get_current_time with system timezone
+            mcp_result = call_mcp_time_server("get_current_time", {})
+            return {
+                "jsonrpc": "2.0",
+                "result": {"answer": mcp_result},
+                "id": id_
+            }
+        # Otherwise, use normal triage
         result_obj = await Runner.run(triage_agent, input_obj.query)
         result = TriageOutput(response=str(result_obj.final_output))
     elif method == "math":
@@ -198,7 +270,7 @@ async def a2a_endpoint(request: Request):
 
     return {
         "jsonrpc": "2.0",
-        "result": result.dict(),
+        "result": result.dict() if hasattr(result, 'dict') else result,
         "id": id_
     }
 
