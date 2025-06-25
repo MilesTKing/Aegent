@@ -5,7 +5,6 @@ import uvicorn
 import uuid
 import re
 import asyncio
-import requests  # Add this import for MCP calls
 
 # --- Security Constants and Checks ---
 MAX_INPUT_LENGTH = 500
@@ -71,14 +70,17 @@ SECURE_INSTRUCTIONS = (
 
 # --- Agent Card (for discovery) ---
 AGENT_CARD = {
-    "id": "triage-agent-001",
-    "name": "TriageAgent",
+    "id": "principal-agent-001",
+    "name": "Principal",
     "description": "Routes questions to the appropriate specialist agent.",
     "capabilities": [
-        {"name": "triage", "description": "Route a question to the right agent."},
+        {"name": "principal", "description": "Route a question to the right agent."},
         {"name": "math", "description": "Answer math questions."},
         {"name": "history", "description": "Answer history questions."},
-        {"name": "time", "description": "Get current time or convert time between timezones using MCP Time Server."}
+        {"name": "biology", "description": "Answer biology questions."},
+        {"name": "psychology", "description": "Answer psychology questions."},
+        {"name": "english_language_arts", "description": "Answer English Language Arts questions."},
+        {"name": "spanish", "description": "Answer Spanish language questions."}
     ],
     "version": "1.0.0",
     "a2a_protocol_version": "0.2.0"
@@ -109,13 +111,6 @@ class HistoryInput(BaseModel):
 class HistoryOutput(BaseModel):
     answer: str
 
-class TimeInput(BaseModel):
-    name: str  # 'get_current_time' or 'convert_time'
-    arguments: dict
-
-class TimeOutput(BaseModel):
-    result: dict
-
 # --- Secure Agents ---
 guardrail_agent = Agent(
     name="Guardrail check",
@@ -126,7 +121,7 @@ guardrail_agent = Agent(
 math_tutor_agent = Agent(
     name="Math Tutor",
     handoff_description="Specialist agent for math questions",
-    instructions=SECURE_INSTRUCTIONS + "You provide help with math problems. You don't need to explain your reasoning, just provide the answer and the operations.",
+    instructions=SECURE_INSTRUCTIONS + "You provide help with math problems. If the user asks for an explanation, show your work step by step. Otherwise, just provide the answer.",
     input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
 )
 
@@ -137,58 +132,47 @@ history_tutor_agent = Agent(
     input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
 )
 
-triage_agent = Agent(
-    name="Triage Agent",
-    instructions=SECURE_INSTRUCTIONS + "You determine which agent to use based on the user's homework question.",
-    handoffs=[history_tutor_agent, math_tutor_agent],
+biology_tutor_agent = Agent(
+    name="Biology Tutor",
+    handoff_description="Specialist agent for biology questions",
+    instructions=SECURE_INSTRUCTIONS + "You provide clear, accurate answers to biology questions. Explain biological concepts, processes, and terminology.",
     input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
 )
 
-# --- MCP Time Server Integration ---
-MCP_TIME_URL = "http://localhost:8080/"
+psychology_tutor_agent = Agent(
+    name="Psychology Tutor",
+    handoff_description="Specialist agent for psychology questions",
+    instructions=SECURE_INSTRUCTIONS + "You provide clear, accurate answers to psychology questions. Explain psychological concepts, theories, and terminology.",
+    input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
+)
 
-# Mapping from common timezone abbreviations to IANA timezone names
-TIMEZONE_ABBREVIATIONS = {
-    "edt": "America/New_York",
-    "est": "America/New_York",
-    "pst": "America/Los_Angeles",
-    "pdt": "America/Los_Angeles",
-    "cst": "America/Chicago",
-    "cdt": "America/Chicago",
-    "mst": "America/Denver",
-    "mdt": "America/Denver",
-    "gmt": "Etc/GMT",
-    "utc": "Etc/UTC",
-    "bst": "Europe/London",
-    "cet": "Europe/Paris",
-    "jst": "Asia/Tokyo",
-    "hkt": "Asia/Hong_Kong",
-    # Add more as needed
-}
+ela_tutor_agent = Agent(
+    name="English Language Arts Tutor",
+    handoff_description="Specialist agent for English Language Arts questions",
+    instructions=SECURE_INSTRUCTIONS + "You help with English language arts, including reading comprehension, writing, grammar, and literary analysis.",
+    input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
+)
 
-def map_timezone(tz):
-    if not tz:
-        return tz
-    tz_lower = tz.lower()
-    return TIMEZONE_ABBREVIATIONS.get(tz_lower, tz)
+spanish_tutor_agent = Agent(
+    name="Spanish Tutor",
+    handoff_description="Specialist agent for Spanish language questions",
+    instructions=SECURE_INSTRUCTIONS + "You help with Spanish language questions, including grammar, vocabulary, translation, and conversation.",
+    input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
+)
 
-def call_mcp_time_server(method: str, arguments: dict) -> dict:
-    payload = {
-        "jsonrpc": "2.0",
-        "method": method,
-        "params": arguments,
-        "id": str(uuid.uuid4())
-    }
-    try:
-        resp = requests.post(MCP_TIME_URL, json=payload, timeout=5)
-        resp.raise_for_status()
-        data = resp.json()
-        if "result" in data:
-            return data["result"]
-        else:
-            return {"error": data.get("error", "Unknown error from MCP server")}
-    except Exception as e:
-        return {"error": str(e)}
+principal_agent = Agent(
+    name="Principal",
+    instructions=SECURE_INSTRUCTIONS + "You determine which agent to use based on the user's homework question.",
+    handoffs=[
+        history_tutor_agent,
+        math_tutor_agent,
+        biology_tutor_agent,
+        psychology_tutor_agent,
+        ela_tutor_agent,
+        spanish_tutor_agent
+    ],
+    input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
+)
 
 # --- JSON-RPC 2.0 Handler ---
 @app.post("/a2a")
@@ -198,56 +182,9 @@ async def a2a_endpoint(request: Request):
     params = data.get("params", {})
     id_ = data.get("id", str(uuid.uuid4()))
 
-    # Helper: detect time question
-    def is_time_question(text):
-        text = text.lower()
-        time_keywords = ["time", "timezone", "convert time", "current time", "what time", "when is", "clock", "now in", "utc", "pst", "est", "cst", "gmt", "jst", "bst", "cet", "edt", "pdt", "date", "hour"]
-        return any(word in text for word in time_keywords)
-
     if method == "triage":
         input_obj = TriageInput(**params)
-        # Route to time server if time question
-        if is_time_question(input_obj.query):
-            # Try to parse for conversion or current time
-            q = input_obj.query.lower()
-            if "convert" in q or "in" in q:
-                # Try to extract time conversion (very basic)
-                # Example: "Convert 16:30 from New York to Tokyo"
-                import re
-                m = re.search(r'(\d{1,2}:\d{2})\s*(from|in)\s*([\w/]+)\s*(to|in)\s*([\w/]+)', q)
-                if m:
-                    time_val = m.group(1)
-                    source = map_timezone(m.group(3).replace(' ', '_'))
-                    target = map_timezone(m.group(5).replace(' ', '_'))
-                    mcp_result = call_mcp_time_server("convert_time", {
-                        "source_timezone": source,
-                        "time": time_val,
-                        "target_timezone": target
-                    })
-                    return {
-                        "jsonrpc": "2.0",
-                        "result": {"answer": mcp_result},
-                        "id": id_
-                    }
-            # Otherwise, try to get current time in a place
-            m = re.search(r'(time|current time|now)\s*(in)?\s*([\w/]+)', q)
-            if m:
-                tz = map_timezone(m.group(3).replace(' ', '_'))
-                mcp_result = call_mcp_time_server("get_current_time", {"timezone": tz})
-                return {
-                    "jsonrpc": "2.0",
-                    "result": {"answer": mcp_result},
-                    "id": id_
-                }
-            # Fallback: just call get_current_time with system timezone
-            mcp_result = call_mcp_time_server("get_current_time", {})
-            return {
-                "jsonrpc": "2.0",
-                "result": {"answer": mcp_result},
-                "id": id_
-            }
-        # Otherwise, use normal triage
-        result_obj = await Runner.run(triage_agent, input_obj.query)
+        result_obj = await Runner.run(principal_agent, input_obj.query)
         result = TriageOutput(response=str(result_obj.final_output))
     elif method == "math":
         input_obj = MathInput(**params)
@@ -257,10 +194,6 @@ async def a2a_endpoint(request: Request):
         input_obj = HistoryInput(**params)
         result_obj = await Runner.run(history_tutor_agent, input_obj.question)
         result = HistoryOutput(answer=str(result_obj.final_output))
-    elif method == "time":
-        input_obj = TimeInput(**params)
-        mcp_result = call_mcp_time_server(input_obj.name, input_obj.arguments)
-        result = TimeOutput(result=mcp_result)
     else:
         return {
             "jsonrpc": "2.0",
