@@ -1,10 +1,12 @@
 from fastapi import FastAPI, Request
+import fastmcp
 from pydantic import BaseModel
 from typing import Any
 import uvicorn
 import uuid
 import re
 import asyncio
+import httpx
 
 # --- Security Constants and Checks ---
 MAX_INPUT_LENGTH = 500
@@ -111,6 +113,12 @@ class HistoryInput(BaseModel):
 class HistoryOutput(BaseModel):
     answer: str
 
+class CoffeeInput(BaseModel):
+    question: str
+
+class CoffeeOutput(BaseModel):
+    answer: str
+
 # --- Secure Agents ---
 guardrail_agent = Agent(
     name="Guardrail check",
@@ -160,6 +168,13 @@ spanish_tutor_agent = Agent(
     input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
 )
 
+coffee_tutor_agent = Agent(
+    name="Coffee Tutor",
+    handoff_description="Specialist agent for coffee questions",
+    instructions=SECURE_INSTRUCTIONS + "You answer questions about types of coffee. Only answer with information from the provided coffee types list. If the question is not about coffee types, politely refuse.",
+    input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
+)
+
 principal_agent = Agent(
     name="Principal",
     instructions=SECURE_INSTRUCTIONS + "You determine which agent to use based on the user's homework question.",
@@ -169,7 +184,8 @@ principal_agent = Agent(
         biology_tutor_agent,
         psychology_tutor_agent,
         ela_tutor_agent,
-        spanish_tutor_agent
+        spanish_tutor_agent,
+        coffee_tutor_agent
     ],
     input_guardrails=[InputGuardrail(guardrail_function=security_guardrail)],
 )
@@ -194,6 +210,25 @@ async def a2a_endpoint(request: Request):
         input_obj = HistoryInput(**params)
         result_obj = await Runner.run(history_tutor_agent, input_obj.question)
         result = HistoryOutput(answer=str(result_obj.final_output))
+    elif method == "coffee":
+        input_obj = CoffeeInput(**params)
+        # Fetch coffee types from the tool
+        async with httpx.AsyncClient() as client:
+            resp = await client.get("https://api.sampleapis.com/coffee/hot")
+            resp.raise_for_status()
+            coffee_list = resp.json()
+        coffee_types = [c.get("title", "") for c in coffee_list if "title" in c]
+        # Only answer if the question is about coffee types
+        if any(word in input_obj.question.lower() for word in ["type", "kind", "variety", "coffee"]):
+            answer = f"Here are some types of coffee: {', '.join(coffee_types)}"
+        else:
+            answer = "I can only answer questions about types of coffee."
+        result = CoffeeOutput(answer=answer)
+        return {
+            "jsonrpc": "2.0",
+            "result": result.model_dump() if hasattr(result, 'dict') else result,
+            "id": id_
+        }
     else:
         return {
             "jsonrpc": "2.0",
@@ -203,9 +238,70 @@ async def a2a_endpoint(request: Request):
 
     return {
         "jsonrpc": "2.0",
-        "result": result.dict() if hasattr(result, 'dict') else result,
+        "result": result.model_dump() if hasattr(result, 'dict') else result,
         "id": id_
     }
 
+try:
+    from fastmcp import FastMCP
+    FASTMCP_AVAILABLE = True
+except ImportError:
+    FASTMCP_AVAILABLE = False
+
 if __name__ == "__main__":
+    import threading
+    if FASTMCP_AVAILABLE:
+        print("Starting MCP server on port 8090...")
+        mcp = FastMCP(stateless_http=True)
+        from agents import Runner
+
+        @mcp.tool(name="explain_concept", description="Explain a concept in a given subject.")
+        async def mcp_explain_concept(subject: str, concept: str) -> dict:
+            question = f"Explain the concept of '{concept}' in {subject}."
+            result = await Runner.run(principal_agent, question)
+            return {"explanation": result.final_output}
+
+        @mcp.tool(name="quiz_question", description="Generate a quiz question and answer for a topic in a subject.")
+        async def mcp_quiz_question(subject: str, topic: str) -> dict:
+            question = f"Generate a quiz question and answer for the topic '{topic}' in {subject}."
+            result = await Runner.run(principal_agent, question)
+            return {"quiz": result.final_output}
+
+        @mcp.tool(name="summarize_text", description="Summarize the provided text.")
+        async def mcp_summarize_text(text: str) -> dict:
+            question = f"Summarize the following text: {text}"
+            result = await Runner.run(principal_agent, question)
+            return {"summary": result.final_output}
+
+        @mcp.tool(name="list_coffee_types", description="List types of coffee from an external API.")
+        async def mcp_list_coffee_types() -> dict:
+            url = "https://api.sampleapis.com/coffee/hot"  # Using the 'hot' endpoint for coffee types
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(url)
+                resp.raise_for_status()
+                coffee_list = resp.json()
+            # Return a list of coffee names
+            return {"types": [c.get("title", "") for c in coffee_list if "title" in c]}
+
+        @mcp.resource("resource://.well-known/agent-card.json")
+        def mcp_agent_card() -> dict:
+            return {
+                "id": "principal-mcp-agent-001",
+                "name": "Principal MCP Agent",
+                "description": "Exposes teaching tools via MCP (explain, quiz, summarize).",
+                "capabilities": [
+                    {"name": "explain_concept", "description": "Explain a concept in a subject."},
+                    {"name": "quiz_question", "description": "Generate a quiz question and answer."},
+                    {"name": "summarize_text", "description": "Summarize a text."},
+                    {"name": "list_coffee_types", "description": "List types of coffee from an external API."}
+                ],
+                "version": "1.0.0",
+                "mcp_protocol_version": "0.1.0"
+            }
+
+        def run_mcp():
+            mcp.run(transport="streamable-http", host="0.0.0.0", port=8090)
+        threading.Thread(target=run_mcp, daemon=True).start()
+    else:
+        print("fastmcp is not installed; MCP server will not start.")
     uvicorn.run(app, host="0.0.0.0", port=9000) 
