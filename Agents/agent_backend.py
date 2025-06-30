@@ -1,6 +1,8 @@
 import asyncio
 from typing import Any, Callable, List, Optional
 import os
+import openai
+from openai import OpenAI
 
 class GuardrailFunctionOutput:
     def __init__(self, output_info: str, tripwire_triggered: bool):
@@ -22,13 +24,9 @@ class Agent:
 # --- OpenAI LLM for all agents (supports chat and text models) ---
 async def gpt_openai_answer(agent_name, input_data):
     try:
-        import openai
-    except ImportError:
-        return "OpenAI package not installed. Please run 'pip install openai'."
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return "OpenAI API key not set. Please set the OPENAI_API_KEY environment variable."
-    try:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return "OpenAI API key not set. Please set the OPENAI_API_KEY environment variable."
         client = openai.OpenAI(api_key=api_key)
         chat_models = ["gpt-4o", "gpt-4", "gpt-4-turbo", "gpt-3.5-turbo"]
         text_models = ["text-davinci-003"]
@@ -91,6 +89,13 @@ def is_history_question(text):
     text = text.lower()
     history_keywords = ["who", "when", "where", "history", "president", "revolution", "war", "battle", "year", "event", "happened", "occurred", "leader", "empire", "ancient", "modern", "king", "queen", "dynasty"]
     return any(word in text for word in history_keywords)
+
+def is_time_question(text):
+    text = text.lower()
+    time_keywords = [
+        "time", "timezone", "clock", "current time", "what time", "now", "hour", "minute", "second", "date", "day", "today"
+    ]
+    return any(word in text for word in time_keywords)
 
 # --- Subject-specific agents ---
 SECURE_INSTRUCTIONS = (
@@ -182,7 +187,10 @@ print("Triage agent handoffs:", [(a.name, id(a)) for a in triage_agent.handoffs]
 
 class Runner:
     @staticmethod
-    async def run(agent: Agent, input_data: str):
+    async def run(agent: Agent, input_data: str, agents_used=None):
+        if agents_used is None:
+            agents_used = []
+        agents_used.append(agent.name)
         class Result:
             def __init__(self, final_output: str):
                 self.final_output = final_output
@@ -190,76 +198,50 @@ class Runner:
         for guardrail in agent.input_guardrails:
             guardrail_result = await guardrail.guardrail_function(None, agent, input_data)
             if guardrail_result.tripwire_triggered:
-                return Result(f"[SECURITY BLOCKED] {guardrail_result.output_info}")
+                return Result(f"[SECURITY BLOCKED] {guardrail_result.output_info}"), agents_used
         # Classic routing for Triage Agent
         if agent.name == "Triage Agent":
             print(f"[TRIAGE DEBUG] Input: {input_data}")
-            if is_math_question(input_data):
-                print("[TRIAGE DEBUG] Routed to Math Tutor")
-                math_agent = next((a for a in agent.handoffs if a.name == "Math Tutor"), None)
-                if math_agent:
-                    print("[TRIAGE DEBUG] Selected agent id:", id(math_agent))
-                    math_result = await Runner.run(math_agent, input_data)
-                    return Result(math_result.final_output)
+            # Use OpenAI responses API to classify the question type
+            qtype = classify_question_type(input_data)
+            print(f"[TRIAGE DEBUG] OpenAI responses API classified as: {qtype}")
+            agent_map = {
+                "math": "Math Tutor",
+                "history": "History Tutor",
+                "biology": "Biology Tutor",
+                "psychology": "Psychology Tutor",
+                "ela": "English Language Arts Tutor",
+                "spanish": "Spanish Tutor",
+                "coffee": "Coffee Tutor",
+                "time": "Time Agent"
+            }
+            if qtype in agent_map:
+                routed_agent = next((a for a in agent.handoffs if a.name == agent_map[qtype]), None)
+                if routed_agent:
+                    print(f"[TRIAGE DEBUG] Routed to {agent_map[qtype]}")
+                    routed_result, agents_used = await Runner.run(routed_agent, input_data, agents_used)
+                    return Result(routed_result.final_output), agents_used
                 else:
-                    print("[TRIAGE DEBUG] Math Tutor agent not found!")
-                    return Result("[ERROR] Math Tutor agent not found.")
-            elif is_history_question(input_data):
-                print("[TRIAGE DEBUG] Routed to History Tutor")
-                history_agent = next((a for a in agent.handoffs if a.name == "History Tutor"), None)
-                if history_agent:
-                    print("[TRIAGE DEBUG] Selected agent id:", id(history_agent))
-                    history_result = await Runner.run(history_agent, input_data)
-                    return Result(history_result.final_output)
-                else:
-                    print("[TRIAGE DEBUG] History Tutor agent not found!")
-                    return Result("[ERROR] History Tutor agent not found.")
-            elif is_biology_question(input_data):
-                print("[TRIAGE DEBUG] Routed to Biology Tutor")
-                bio_agent = next((a for a in agent.handoffs if a.name == "Biology Tutor"), None)
-                if bio_agent:
-                    print("[TRIAGE DEBUG] Selected agent id:", id(bio_agent))
-                    bio_result = await Runner.run(bio_agent, input_data)
-                    return Result(bio_result.final_output)
-                else:
-                    print("[TRIAGE DEBUG] Biology Tutor agent not found!")
-                    return Result("[ERROR] Biology Tutor agent not found.")
-            elif is_psychology_question(input_data):
-                print("[TRIAGE DEBUG] Routed to Psychology Tutor")
-                psych_agent = next((a for a in agent.handoffs if a.name == "Psychology Tutor"), None)
-                if psych_agent:
-                    print("[TRIAGE DEBUG] Selected agent id:", id(psych_agent))
-                    psych_result = await Runner.run(psych_agent, input_data)
-                    return Result(psych_result.final_output)
-                else:
-                    print("[TRIAGE DEBUG] Psychology Tutor agent not found!")
-                    return Result("[ERROR] Psychology Tutor agent not found.")
-            elif is_ela_question(input_data):
-                print("[TRIAGE DEBUG] Routed to English Language Arts Tutor")
-                ela_agent = next((a for a in agent.handoffs if a.name == "English Language Arts Tutor"), None)
-                if ela_agent:
-                    print("[TRIAGE DEBUG] Selected agent id:", id(ela_agent))
-                    ela_result = await Runner.run(ela_agent, input_data)
-                    return Result(ela_result.final_output)
-                else:
-                    print("[TRIAGE DEBUG] English Language Arts Tutor agent not found!")
-                    return Result("[ERROR] English Language Arts Tutor agent not found.")
-            elif is_spanish_question(input_data):
-                print("[TRIAGE DEBUG] Routed to Spanish Tutor")
-                spanish_agent = next((a for a in agent.handoffs if a.name == "Spanish Tutor"), None)
-                if spanish_agent:
-                    print("[TRIAGE DEBUG] Selected agent id:", id(spanish_agent))
-                    spanish_result = await Runner.run(spanish_agent, input_data)
-                    return Result(spanish_result.final_output)
-                else:
-                    print("[TRIAGE DEBUG] Spanish Tutor agent not found!")
-                    return Result("[ERROR] Spanish Tutor agent not found.")
+                    print(f"[TRIAGE DEBUG] {agent_map[qtype]} not found!")
+                    return Result(f"[ERROR] {agent_map[qtype]} not found."), agents_used
             else:
-                print("[TRIAGE DEBUG] No matching subject found.")
-                return Result("Sorry, I can only answer math, history, biology, psychology, English language arts, or Spanish questions.")
+                print("[TRIAGE DEBUG] No matching subject found by OpenAI responses API.")
+                return Result("Sorry, I can only answer math, history, biology, psychology, English language arts, Spanish, coffee, or time questions."), agents_used
         # All other agents use OpenAI GPT
         answer = await gpt_openai_answer(agent.name, input_data)
-        return Result(answer)
+        return Result(answer), agents_used
+
+# GPT-4.1 nano-based classification for triage
+def classify_question_type(question):
+    client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+    response = client.responses.create(
+        model="gpt-4.1-nano",
+        instructions=(
+            "Classify the following question as one of: math, history, biology, psychology, ELA, Spanish, coffee, time, or unknown."
+        ),
+        input=f"Question: \"{question}\"\nType:",
+    )
+    return response.output_text.strip().lower()
 
 TIMEZONE_ABBREVIATIONS = {
     "edt": "America/New_York",
